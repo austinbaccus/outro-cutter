@@ -18,51 +18,76 @@ def get_video_duration(video_path):
         return frame_count / fps
     return 0.0
 
-def find_third_to_last_black_frame(video_path, pic_th=0.99, pix_th=0.00, duration=0.000001, use_gpu=False):
+def trim_last_n_seconds(input_path, output_path, seconds=8):
     """
-    Use FFmpeg's blackdetect filter with optional GPU decoding.
-    threshold: 0.0-1.0, percentage of black pixels
+    Trim the last N seconds from a video.
     """
+    print(f"Processing: {input_path.name}")
+    
+    # Get video duration
+    duration = get_video_duration(input_path)
+    
+    if duration <= seconds:
+        print(f"  Warning: Video is only {duration:.2f}s, skipping")
+        return False
+    
+    cut_time = duration - seconds
+    print(f"  Trimming at {cut_time:.2f}s (removing last {seconds}s)...")
+    
+    ffmpeg.input(str(input_path), t=cut_time).output(
+        str(output_path),
+        codec='copy',
+        loglevel='error'
+    ).run()
+    
+    print(f"✅ Completed: {input_path.name}")
+    return True
 
-    cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'info']
+def find_first_black_frame_from_end(video_path, threshold=2, search_seconds=120):
+    """
+    Search backwards from the end, cut at the FIRST black frame encountered.
+    threshold: max average pixel brightness (0-255) to consider black
+    search_seconds: how many seconds from the end to search
+    """
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    if use_gpu:
-        # NVIDIA GPU decoding (NVDEC)
-        cmd.extend([
-            '-hwaccel', 'cuda',
-            '-hwaccel_output_format', 'cuda',
-        ])
+    print(f"  Total frames: {frame_count}, FPS: {fps}")
     
-    cmd.extend([
-        '-i', str(video_path),
-        '-vf', f'blackdetect=d={duration}',
-        '-an',  # no audio
-        '-f', 'null',
-        '-'
-    ])
+    # Calculate search range
+    search_frames = int(fps * search_seconds)
+    start_frame = max(0, frame_count - search_frames)
     
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='ignore')
+    # Search backwards from the last frame
+    for frame_num in range(frame_count - 1, start_frame, -1):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+        ret, frame = cap.read()
+        
+        if not ret:
+            continue
+        
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        avg_brightness = np.mean(gray)
+        
+        is_black = avg_brightness < threshold
+        
+        # First black frame we encounter going backwards
+        if is_black:
+            cap.release()
+            timestamp = frame_num / fps
+            print(f"  Found black frame at {timestamp:.2f}s (frame {frame_num})")
+            return timestamp
     
-    # Parse FFmpeg output for black frames
-    black_frames = []
-    
-    for line in result.stderr.split('\n'):
-        if 'black_start' in line:
-            parts = line.split()
-            for part in parts:
-                if part.startswith('black_start:'):
-                    black_frame_timestamp = float(part.split(':')[1])
-                    black_frames.append(black_frame_timestamp)
-
-
-    return black_frames[-3]
+    cap.release()
+    print(f"  No black frames found in last {search_seconds} seconds")
     return None
 
-def trim_video_at_black_frame(input_path, output_path, outro_time):
+def trim_video_at_black_frame(input_path, output_path):
     """Trim video at the last black frame."""
     print(f"\nProcessing: {input_path.name}")
     
-    cut_time = find_third_to_last_black_frame(input_path)
+    cut_time = find_first_black_frame_from_end(input_path)
     
     if cut_time is None:
         print(f"❌ Warning: No black frame found, skipping {input_path.name}")
@@ -80,10 +105,10 @@ def trim_video_at_black_frame(input_path, output_path, outro_time):
     return True
 
 # Main processing
-video_dir = Path("./videos")
-output_dir = Path("./trimmed_videos")
-output_dir.mkdir(exist_ok=True)
+dir_videos = Path("./videos")
+dir_trimmed = Path("./videos_trimmed")
+dir_final = Path("./videos_final")
 
-for video_file in video_dir.glob("*.webm"):
-    output_path = output_dir / video_file.name
-    trim_video_at_black_frame(video_file, output_path, 25)
+for video_file in dir_videos.glob("*.webm"):
+    trim_last_n_seconds(video_file, dir_trimmed / video_file.name, seconds=13)
+    trim_video_at_black_frame(dir_trimmed / video_file.name, dir_final / video_file.name)
